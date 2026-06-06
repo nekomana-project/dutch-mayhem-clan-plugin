@@ -9,8 +9,8 @@ public interface DiscordCCConfig extends Config
 {
 	@ConfigItem(
 			keyName = "serverUrl",
-			name = "Clan Chat URL",
-			description = "Endpoint for clan chat messages — get this from #bot-info in the DMC Discord",
+			name = "Server URL",
+			description = "Base server URL — get this from #bot-info in the DMC Discord (e.g. http://128.140.67.197:8080)",
 			position = 1
 	)
 	default String serverUrl()
@@ -19,58 +19,14 @@ public interface DiscordCCConfig extends Config
 	}
 
 	@ConfigItem(
-			keyName = "wildyLootUrl",
-			name = "Wildy Loot URL",
-			description = "Endpoint for wilderness loot tracking — get this from #bot-info in the DMC Discord",
-			position = 2
-	)
-	default String wildyLootUrl()
-	{
-		return "";
-	}
-
-	@ConfigItem(
 			keyName = "secretToken",
 			name = "Personal Token",
 			description = "Your personal token from /mytoken in Discord",
-			position = 3,
+			position = 2,
 			secret = true
 	)
 	default String secretToken()
 	{
 		return "";
-	}
-
-	@ConfigItem(
-			keyName = "minLootValue",
-			name = "Minimum Loot Value (GP)",
-			description = "Items worth less than this (per stack) are not sent to the bot. Set to 0 to send everything.",
-			position = 4
-	)
-	default int minLootValue()
-	{
-		return 10_000;
-	}
-
-	@ConfigItem(
-			keyName = "sendNpcLoot",
-			name = "Track NPC Loot",
-			description = "Send loot received from NPC kills to the bot",
-			position = 5
-	)
-	default boolean sendNpcLoot()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-			keyName = "sendPvpLoot",
-			name = "Track PvP Loot",
-			description = "Send loot received from player kills to the bot",
-			position = 6
-	)
-	default boolean sendPvpLoot()
-	{
-		return true;
 	}
 }
