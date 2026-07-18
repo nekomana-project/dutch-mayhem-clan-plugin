@@ -10,7 +10,7 @@ public interface DiscordCCConfig extends Config
 	@ConfigItem(
 			keyName = "serverUrl",
 			name = "Server URL",
-			description = "Base server URL — get this from #bot-info in the DMC Discord (e.g. http://128.140.67.197:8080)",
+			description = "Base server URL — get this from #bot-info in the DMC Discord",
 			position = 1
 	)
 	default String serverUrl()
