@@ -105,11 +105,17 @@ public class DiscordCCPlugin extends Plugin
 	private int lastAttackerTick = -1;
 	private String lastTargeterName;
 
-	// Players we dealt damage to (name → tick). A player's death within
-	// ATTACKER_TIMEOUT_TICKS of our last hit on them counts as our kill —
-	// the reliable signal for loot-key kills, which emit no personal
-	// "You have defeated X!" game message.
-	private final Map<String, Integer> damagedPlayers = new HashMap<>();
+	// Damage we dealt to other players (name → running total + last-hit tick).
+	// A player's death within ATTACKER_TIMEOUT_TICKS of our last hit counts as
+	// our kill — the reliable signal for loot-key kills, which emit no personal
+	// "You have defeated X!" game message. The damage total is sent with the
+	// kill so the server can credit the top-damage attacker in a multi-way pile.
+	private static final class DamageDealt
+	{
+		int total;
+		int tick;
+	}
+	private final Map<String, DamageDealt> damagedPlayers = new HashMap<>();
 
 	// ── Retry queue for failed POSTs ──────────────────────────────────────────
 
@@ -452,7 +458,18 @@ public class DiscordCCPlugin extends Plugin
 		if (actor instanceof Player && actor != client.getLocalPlayer()
 				&& event.getHitsplat().isMine() && actor.getName() != null)
 		{
-			damagedPlayers.put(Text.removeTags(actor.getName()), client.getTickCount());
+			String name = Text.removeTags(actor.getName());
+			int tick = client.getTickCount();
+			DamageDealt d = damagedPlayers.get(name);
+			// Reset the running total when the previous hit is stale, so damage
+			// is scoped to the current engagement rather than a past one.
+			if (d == null || tick - d.tick > ATTACKER_TIMEOUT_TICKS)
+			{
+				d = new DamageDealt();
+				damagedPlayers.put(name, d);
+			}
+			d.total += event.getHitsplat().getAmount();
+			d.tick = tick;
 		}
 
 		if (actor != client.getLocalPlayer()) return;
@@ -538,8 +555,8 @@ public class DiscordCCPlugin extends Plugin
 		if (rsn == null) return;
 
 		String victimName = Text.removeTags(victim.getName());
-		Integer hitTick = damagedPlayers.remove(victimName);
-		if (hitTick == null || client.getTickCount() - hitTick > ATTACKER_TIMEOUT_TICKS)
+		DamageDealt dealt = damagedPlayers.remove(victimName);
+		if (dealt == null || client.getTickCount() - dealt.tick > ATTACKER_TIMEOUT_TICKS)
 		{
 			return; // we did not (recently) damage them — not our kill
 		}
@@ -547,6 +564,7 @@ public class DiscordCCPlugin extends Plugin
 		JsonObject payload = new JsonObject();
 		payload.addProperty("rsn",    rsn);
 		payload.addProperty("victim", victimName);
+		payload.addProperty("damage", dealt.total);
 		addPosition(payload, victim);
 		postJson(config.serverUrl() + "/api/wildy-kill", payload);
 	}
