@@ -105,6 +105,12 @@ public class DiscordCCPlugin extends Plugin
 	private int lastAttackerTick = -1;
 	private String lastTargeterName;
 
+	// Players we dealt damage to (name → tick). A player's death within
+	// ATTACKER_TIMEOUT_TICKS of our last hit on them counts as our kill —
+	// the reliable signal for loot-key kills, which emit no personal
+	// "You have defeated X!" game message.
+	private final Map<String, Integer> damagedPlayers = new HashMap<>();
+
 	// ── Retry queue for failed POSTs ──────────────────────────────────────────
 
 	private static final int MAX_RETRIES = 3;
@@ -152,11 +158,6 @@ public class DiscordCCPlugin extends Plugin
 			"Congratulations, you(?:'ve| have) completed all of the (Easy|Medium|Hard|Elite) tasks? in the (.+?) (?:Diary|diary)",
 			Pattern.CASE_INSENSITIVE);
 
-	// Matches e.g. "You have defeated Zezima!" (PvP kill)
-	private static final Pattern PK_KILL_PATTERN = Pattern.compile(
-			"You have defeated (.+?)[.!]",
-			Pattern.CASE_INSENSITIVE);
-
 	// ── Config ────────────────────────────────────────────────────────────────
 
 	@Provides
@@ -174,6 +175,7 @@ public class DiscordCCPlugin extends Plugin
 		lastAttackerName = null;
 		lastAttackerTick = -1;
 		lastTargeterName = null;
+		damagedPlayers.clear();
 	}
 
 	// ── Login/logout state ────────────────────────────────────────────────────
@@ -195,6 +197,7 @@ public class DiscordCCPlugin extends Plugin
 				lastAttackerName = null;
 				lastAttackerTick = -1;
 				lastTargeterName = null;
+				damagedPlayers.clear();
 				break;
 			default:
 				break;
@@ -229,33 +232,13 @@ public class DiscordCCPlugin extends Plugin
 			}
 		}
 
-		// Personal game messages — PK kills + bingo-relevant events
+		// Personal game messages — bingo-relevant events. PK kills are
+		// detected from the victim's death (onActorDeath), not a chat
+		// message: loot-key kills emit no "You have defeated X!" line.
 		if (type == ChatMessageType.GAMEMESSAGE)
 		{
-			handlePkKillMessage(event.getMessage());
 			handleBingoGameMessage(event.getMessage());
 		}
-	}
-
-	/**
-	 * "You have defeated X!" — fires on every PvP kill, with or without loot keys.
-	 * Carries the kill position + time so the website can plot kills on the map.
-	 */
-	private void handlePkKillMessage(String rawMessage)
-	{
-		if (!isConfigured() || !isPvpEnvironment()) return;
-
-		String rsn = getLocalRsn();
-		if (rsn == null) return;
-
-		Matcher m = PK_KILL_PATTERN.matcher(Text.removeTags(rawMessage));
-		if (!m.find()) return;
-
-		JsonObject payload = new JsonObject();
-		payload.addProperty("rsn",    rsn);
-		payload.addProperty("victim", m.group(1).trim());
-		addPosition(payload);
-		postJson(config.serverUrl() + "/api/wildy-kill", payload);
 	}
 
 	private void handleBingoGameMessage(String rawMessage)
@@ -463,7 +446,16 @@ public class DiscordCCPlugin extends Plugin
 	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied event)
 	{
-		if (event.getActor() != client.getLocalPlayer()) return;
+		Actor actor = event.getActor();
+
+		// Damage we dealt to another player — kill-attribution candidate.
+		if (actor instanceof Player && actor != client.getLocalPlayer()
+				&& event.getHitsplat().isMine() && actor.getName() != null)
+		{
+			damagedPlayers.put(Text.removeTags(actor.getName()), client.getTickCount());
+		}
+
+		if (actor != client.getLocalPlayer()) return;
 
 		// Damage landed on us — attribute it to whoever is targeting us right
 		// now, falling back to the last player seen targeting us.
@@ -491,7 +483,16 @@ public class DiscordCCPlugin extends Plugin
 	@Subscribe
 	public void onActorDeath(ActorDeath event)
 	{
-		if (event.getActor() != client.getLocalPlayer()) return;
+		Actor actor = event.getActor();
+
+		// Another player died — our kill if we damaged them recently.
+		if (actor instanceof Player && actor != client.getLocalPlayer())
+		{
+			handlePotentialKill((Player) actor);
+			return;
+		}
+
+		if (actor != client.getLocalPlayer()) return;
 		if (!isConfigured() || !isPvpEnvironment()) return;
 
 		String rsn = getLocalRsn();
@@ -523,6 +524,33 @@ public class DiscordCCPlugin extends Plugin
 		postJson(config.serverUrl() + "/api/wildy-death", payload);
 	}
 
+	/**
+	 * A nearby player died — attribute it to us only if we dealt them damage
+	 * within ATTACKER_TIMEOUT_TICKS. Works for loot-key kills (no "defeated"
+	 * message) and plots at the victim's tile, i.e. the actual kill spot.
+	 */
+	private void handlePotentialKill(Player victim)
+	{
+		if (!isConfigured() || !isPvpEnvironment()) return;
+		if (victim.getName() == null) return;
+
+		String rsn = getLocalRsn();
+		if (rsn == null) return;
+
+		String victimName = Text.removeTags(victim.getName());
+		Integer hitTick = damagedPlayers.remove(victimName);
+		if (hitTick == null || client.getTickCount() - hitTick > ATTACKER_TIMEOUT_TICKS)
+		{
+			return; // we did not (recently) damage them — not our kill
+		}
+
+		JsonObject payload = new JsonObject();
+		payload.addProperty("rsn",    rsn);
+		payload.addProperty("victim", victimName);
+		addPosition(payload, victim);
+		postJson(config.serverUrl() + "/api/wildy-kill", payload);
+	}
+
 	// ── Location helpers ──────────────────────────────────────────────────────
 
 	private static final WorldArea WILDERNESS_ABOVE_GROUND = new WorldArea(2944, 3523, 448, 448, 0);
@@ -549,12 +577,18 @@ public class DiscordCCPlugin extends Plugin
 		return isInWilderness() || isPvpWorld();
 	}
 
-	/** Adds kill/death position, world and client timestamp to a payload. */
+	/** Adds our own position — used for deaths. */
 	private void addPosition(JsonObject payload)
 	{
-		if (client.getLocalPlayer() != null)
+		addPosition(payload, client.getLocalPlayer());
+	}
+
+	/** Adds the given actor's position, world and client timestamp to a payload. */
+	private void addPosition(JsonObject payload, Actor actor)
+	{
+		if (actor != null)
 		{
-			WorldPoint loc = client.getLocalPlayer().getWorldLocation();
+			WorldPoint loc = actor.getWorldLocation();
 			payload.addProperty("x",     loc.getX());
 			payload.addProperty("y",     loc.getY());
 			payload.addProperty("plane", loc.getPlane());
