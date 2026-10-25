@@ -637,7 +637,7 @@ public class DiscordCCPlugin extends Plugin
 			int    itemId   = item.getId();
 			int    quantity = item.getQuantity();
 			String itemName = itemManager.getItemComposition(itemId).getName();
-			int    gePrice  = itemManager.getItemPrice(itemId);
+			long   gePrice  = itemManager.getItemPrice(itemId);
 
 			JsonObject entry = new JsonObject();
 			entry.addProperty("itemId",   itemId);
@@ -681,7 +681,7 @@ public class DiscordCCPlugin extends Plugin
 			int    itemId   = item.getId();
 			int    quantity = item.getQuantity();
 			String itemName = itemManager.getItemComposition(itemId).getName();
-			int    gePrice  = itemManager.getItemPrice(itemId);
+			long   gePrice  = itemManager.getItemPrice(itemId);
 
 			JsonObject entry = new JsonObject();
 			entry.addProperty("item",     itemName);
