@@ -20,6 +20,7 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.HitsplatApplied;
 import net.runelite.api.events.InteractingChanged;
 import net.runelite.api.events.StatChanged;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.NpcLootReceived;
@@ -58,6 +59,9 @@ public class DiscordCCPlugin extends Plugin
 
 	@Inject
 	private OkHttpClient okHttpClient;
+
+	@Inject
+	private ClientThread clientThread;
 
 	@Inject
 	private ItemManager itemManager;
@@ -139,6 +143,69 @@ public class DiscordCCPlugin extends Plugin
 
 	private final ConcurrentLinkedDeque<PendingPost> retryQueue = new ConcurrentLinkedDeque<>();
 
+	// ── Messages to the player ────────────────────────────────────────────────
+
+	/** Statuses that mean "the server was briefly unavailable" (a deploy, a restart): worth sending again. */
+	private static boolean isRetryableStatus(int code)
+	{
+		return code == 429 || code == 502 || code == 503 || code == 504;
+	}
+
+	/** The last problem we told the player about; the same problem is only shown once until it is fixed. */
+	private volatile String lastWarning;
+
+	/**
+	 * Shows a one-off line in the player's game chat so a wrong setting is not silent. Safe to call from any thread.
+	 * The same text is not repeated until {@link #clearWarning()} ran (a successful post or a new login).
+	 */
+	private void warnPlayer(String text)
+	{
+		if (text.equals(lastWarning))
+		{
+			return;
+		}
+		lastWarning = text;
+		clientThread.invokeLater(() ->
+		{
+			if (client.getGameState() == GameState.LOGGED_IN)
+			{
+				client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "[Dutch Mayhem Clan] " + text, null);
+			}
+		});
+	}
+
+	private void clearWarning()
+	{
+		lastWarning = null;
+	}
+
+	/** Checked at login: a half-filled or malformed setup is reported once instead of failing silently. */
+	private void warnIfMisconfigured()
+	{
+		String url = config.serverUrl() == null ? "" : config.serverUrl().trim();
+		String token = config.secretToken() == null ? "" : config.secretToken().trim();
+		if (url.isEmpty() && token.isEmpty())
+		{
+			return; // not set up at all: the plugin stays silent, nothing is sent
+		}
+		if (url.isEmpty())
+		{
+			warnPlayer("Server URL is empty. Fill it in under the plugin settings (see #bot-info in the Discord).");
+		}
+		else if (!url.startsWith("https://") && !url.startsWith("http://"))
+		{
+			warnPlayer("Server URL must start with https:// (see #bot-info in the Discord).");
+		}
+		else if (url.startsWith("http://"))
+		{
+			warnPlayer("Server URL uses http://, so your token is sent unencrypted. Use the https:// address.");
+		}
+		else if (token.isEmpty())
+		{
+			warnPlayer("Personal Token is empty. Run /mytoken in the Discord and paste it in the plugin settings.");
+		}
+	}
+
 	// ── Game message patterns ─────────────────────────────────────────────────
 
 	private static final Pattern QUEST_PATTERN = Pattern.compile(
@@ -194,6 +261,8 @@ public class DiscordCCPlugin extends Plugin
 			case LOGGED_IN:
 				// Fresh grace window after every (re)login and world hop
 				ticksSinceLogin = 0;
+				clearWarning();
+				warnIfMisconfigured();
 				break;
 			case LOGIN_SCREEN:
 			case HOPPING:
@@ -686,7 +755,7 @@ public class DiscordCCPlugin extends Plugin
 			JsonObject entry = new JsonObject();
 			entry.addProperty("item",     itemName);
 			entry.addProperty("quantity", quantity);
-			entry.addProperty("coins",    (long) gePrice * quantity);
+			entry.addProperty("coins",    gePrice * quantity);
 			itemsArray.add(entry);
 		}
 
@@ -772,7 +841,29 @@ public class DiscordCCPlugin extends Plugin
 			@Override
 			public void onResponse(Call call, Response response) throws IOException
 			{
+				int code = response.code();
 				response.close();
+				if (response.isSuccessful())
+				{
+					clearWarning();
+				}
+				else if (code == 401)
+				{
+					warnPlayer("Your token was not accepted. Run /mytoken in the Discord and paste the new token in the plugin settings.");
+				}
+				else if (code == 403)
+				{
+					warnPlayer("The server says you are not (or no longer) in the clan, so nothing is sent.");
+				}
+				else if (isRetryableStatus(code) && attempt < MAX_RETRIES && retryQueue.size() < MAX_RETRY_QUEUE)
+				{
+					// Server briefly unavailable (e.g. restarting): try again later instead of losing the loot/kill.
+					retryQueue.add(new PendingPost(url, payload, attempt + 1));
+				}
+				else if (code >= 400)
+				{
+					log.warn("POST to {} was rejected with HTTP {}", url, code);
+				}
 			}
 		});
 	}
