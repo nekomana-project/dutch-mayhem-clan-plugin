@@ -1,0 +1,11 @@
+# GitHub proposes a pull request when a dependency or a GitHub Action is outdated. Nothing is merged by itself.
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
